@@ -1,0 +1,21 @@
+# API & Data Handling
+requests==2.31.0
+pandas==2.2.0
+numpy==1.26.3
+fastapi==0.109.2
+uvicorn==0.27.1
+
+# Database
+sqlalchemy==1.4.51
+alembic==1.13.1
+psycopg2-binary==2.9.9
+
+# Workflow Management
+apache-airflow==2.9.2
+apache-airflow-providers-postgres==5.10.0
+apache-airflow-providers-common-sql==1.10.0
+
+# Utilities
+python-dotenv==1.0.0
+pydantic==2.5.3
+backoff==2.2.1  # For exponential backoff retry logic

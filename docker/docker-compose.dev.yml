@@ -1,0 +1,154 @@
+name: pokedata
+
+services:
+  redis:
+    container_name: pokedata-redis-dev
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    mem_limit: 256m
+    volumes:
+      - ../cache/redis:/data
+    command: redis-server --appendonly yes
+
+  postgres:
+    container_name: pokedata-postgres-dev
+    image: postgres:14
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: pokemon_data
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../database/initdb/init.sh:/docker-entrypoint-initdb.d/init.sh
+      - ../database/initdb/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+      - ../database/migrations:/docker-entrypoint-initdb.d/migrations
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    mem_limit: 1g
+
+  app:
+    container_name: pokedata-app-dev
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.app
+    image: pokedata-app:dev
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/pokemon_data
+      API_BASE_URL: https://pokeapi.co/api/v2
+      API_RATE_LIMIT: 20
+      LOG_LEVEL: DEBUG
+    volumes:
+      - ../:/app
+      - api_cache:/app/cache
+    command: uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
+    depends_on:
+      postgres:
+        condition: service_healthy
+    mem_limit: 512m
+    ports:
+      - "8000:8000"
+
+  airflow-scheduler:
+    container_name: pokedata-airflow-scheduler-dev
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.airflow
+    image: pokedata-airflow:dev
+    environment:
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://postgres:postgres@postgres:5432/pokemon_data
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+      AIRFLOW__CORE__FERNET_KEY: development_only_fernet_key_not_for_production
+      PYTHONPATH: /opt/airflow:/opt/airflow/src:/opt/airflow/dags
+      FLASK_LIMITER_STORAGE_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/pokemon_data
+      API_BASE_URL: https://pokeapi.co/api/v2
+      API_RATE_LIMIT: 20
+    volumes:
+      - ../src:/opt/airflow/src
+      - ../src/dags:/opt/airflow/dags
+      - airflow_logs:/opt/airflow/logs
+    command: airflow scheduler
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    mem_limit: 512m
+
+  airflow-webserver:
+    container_name: pokedata-airflow-webserver-dev
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.airflow
+    image: pokedata-airflow:dev
+    environment:
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://postgres:postgres@postgres:5432/pokemon_data
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+      AIRFLOW__CORE__FERNET_KEY: development_only_fernet_key_not_for_production
+      PYTHONPATH: /opt/airflow:/opt/airflow/src:/opt/airflow/dags
+      AIRFLOW__WEBSERVER__SECRET_KEY: your_secret_key_here
+      AIRFLOW__WEBSERVER__WORKERS: 2
+      AIRFLOW__WEBSERVER__WORKER_REFRESH_INTERVAL: 30
+      AIRFLOW__WEBSERVER__WORKER_TIMEOUT: 120
+      AIRFLOW__WEBSERVER__WEB_SERVER_MASTER_TIMEOUT: 120
+      FLASK_LIMITER_STORAGE_URL: redis://redis:6379/0
+    volumes:
+      - ../src:/opt/airflow/src
+      - ../src/dags:/opt/airflow/dags
+      - airflow_logs:/opt/airflow/logs
+    ports:
+      - "8080:8080"
+    command: airflow webserver
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      airflow-scheduler:
+        condition: service_started
+    mem_limit: 1g
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  airflow-init:
+    container_name: pokedata-airflow-init-dev
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.airflow
+    image: pokedata-airflow:dev
+    environment:
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://postgres:postgres@postgres:5432/pokemon_data
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      _AIRFLOW_DB_UPGRADE: "true"
+      _AIRFLOW_WWW_USER_CREATE: "true"
+      _AIRFLOW_WWW_USER_USERNAME: admin
+      _AIRFLOW_WWW_USER_PASSWORD: admin
+      _AIRFLOW_WWW_USER_EMAIL: admin@example.com
+      _AIRFLOW_WWW_USER_FIRSTNAME: Admin
+      _AIRFLOW_WWW_USER_LASTNAME: User
+      _AIRFLOW_WWW_USER_ROLE: Admin
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: bash -c "airflow db init && airflow users create -r Admin -u admin -p admin -e admin@example.com -f Admin -l User"
+
+volumes:
+  postgres_data:
+  api_cache:
+  airflow_logs:
+  # Redis volume is now bind mounted directly to ../cache/redis

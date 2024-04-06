@@ -1,0 +1,18 @@
+-r base.txt
+
+# Development Tools
+pytest==7.4.4
+pytest-cov==4.1.0
+black==23.12.1
+isort==5.13.2
+flake8==7.0.0
+mypy==1.8.0
+
+# Security Scanning
+bandit==1.7.7
+safety==2.3.5
+pre-commit==3.6.0
+
+# Debugging
+ipython==8.20.0
+jupyter==1.0.0
