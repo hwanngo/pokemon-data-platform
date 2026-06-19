@@ -1,0 +1,33 @@
+# Version control & CI
+.git
+.gitignore
+.github
+
+# Python caches / build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Virtual environments (the image builds its own)
+.venv/
+venv/
+ENV/
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+.coverage.*
+
+# Local data / caches
+cache/
+*.log
+
+# Editor / OS cruft
+.idea/
+.vscode/
+.DS_Store

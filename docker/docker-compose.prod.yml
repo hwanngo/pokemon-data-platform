@@ -1,32 +1,39 @@
 name: pokedata
 
-services:
-  redis:
-    container_name: pokedata-redis
-    image: redis:7-alpine
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
-    restart: always
-    mem_limit: 256m
-    volumes:
-      - ../cache/redis:/data
-    command: redis-server --appendonly yes
+# Shared Airflow environment (values come from the repo-root .env file).
+# Production secrets use the `${VAR:?msg}` form: startup fails loudly if unset.
+x-airflow-env: &airflow-env
+  AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-pokemon_data}
+  AIRFLOW__CORE__EXECUTOR: LocalExecutor
+  AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+  AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+  # Airflow 3: LocalExecutor task workers reach the Execution API on the api-server.
+  AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-webserver:8080/execution/
+  AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:?AIRFLOW_FERNET_KEY must be set}
+  # Shared JWT secret — the scheduler signs Execution API tokens the api-server
+  # validates, so BOTH need the same value.
+  AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET:?AIRFLOW_JWT_SECRET must be set}
+  # The DAG lives at /opt/airflow/src/dags (image COPY of src/); no bind mount here.
+  AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/src/dags
 
+services:
   postgres:
     container_name: pokedata-postgres
-    image: postgres:14
+    image: postgres:18-alpine
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
       POSTGRES_DB: ${POSTGRES_DB:-pokemon_data}
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      # postgres:18+ stores data in a versioned subdir, so the volume mounts at
+      # /var/lib/postgresql (not /var/lib/postgresql/data).
+      - postgres_data:/var/lib/postgresql
       - ../database/initdb:/docker-entrypoint-initdb.d
+      # init.sh globs /docker-entrypoint-initdb.d/migrations/versions/*.sql, which
+      # lives outside initdb/, so mount it explicitly (else migrations never run).
+      - ../database/migrations:/docker-entrypoint-initdb.d/migrations
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -41,11 +48,14 @@ services:
     image: pokedata-app:latest
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-pokemon_data}
-      API_BASE_URL: https://pokeapi.co/api/v2
-      API_RATE_LIMIT: 20
-      LOG_LEVEL: INFO
+      API_BASE_URL: ${API_BASE_URL:-https://pokeapi.co/api/v2}
+      API_RATE_LIMIT: ${API_RATE_LIMIT:-20}
+      API_CONCURRENCY: ${API_CONCURRENCY:-8}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
     volumes:
-      - api_cache:/app/cache
+      # Project-local raw-JSON cache (bind mount) at <repo>/cache.
+      - ../cache:/app/cache
+    command: gunicorn src.main:app -k uvicorn.workers.UvicornWorker -b 0.0.0.0:8000 --workers 2
     depends_on:
       postgres:
         condition: service_healthy
@@ -59,23 +69,40 @@ services:
       dockerfile: docker/Dockerfile.airflow
     image: pokedata-airflow:latest
     environment:
-      AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-pokemon_data}
-      AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-your_production_fernet_key_here}
-      FLASK_LIMITER_STORAGE_URL: redis://redis:6379/0
+      <<: *airflow-env
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-pokemon_data}
-      API_BASE_URL: https://pokeapi.co/api/v2
-      API_RATE_LIMIT: 20
+      API_BASE_URL: ${API_BASE_URL:-https://pokeapi.co/api/v2}
+      API_RATE_LIMIT: ${API_RATE_LIMIT:-20}
+      API_CONCURRENCY: ${API_CONCURRENCY:-8}
     volumes:
-      - ../src:/opt/airflow/src
       - airflow_logs:/opt/airflow/logs
+      # Project-local raw-JSON cache (bind mount) at <repo>/cache.
+      - ../cache:/opt/airflow/cache
     command: airflow scheduler
     depends_on:
       postgres:
         condition: service_healthy
-      redis:
+    restart: always
+    # LocalExecutor runs task processes here; pandas/numpy ETL tasks need headroom.
+    mem_limit: 2g
+
+  # Airflow 3: DAG parsing is a separate component — without it, no DAGs appear.
+  airflow-dag-processor:
+    container_name: pokedata-airflow-dag-processor
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.airflow
+    image: pokedata-airflow:latest
+    environment:
+      <<: *airflow-env
+    volumes:
+      - airflow_logs:/opt/airflow/logs
+    command: airflow dag-processor
+    depends_on:
+      postgres:
         condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
     restart: always
     mem_limit: 512m
 
@@ -86,28 +113,28 @@ services:
       dockerfile: docker/Dockerfile.airflow
     image: pokedata-airflow:latest
     environment:
-      AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-pokemon_data}
-      AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-your_production_fernet_key_here}
-      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY:-your_production_secret_key_here}
-      AIRFLOW__WEBSERVER__BASE_URL: ${AIRFLOW_BASE_URL:-http://localhost:8080}
-      FLASK_LIMITER_STORAGE_URL: redis://redis:6379/0
+      <<: *airflow-env
+      # JWT secret comes from the shared anchor. API session secret + base url (webserver-only):
+      AIRFLOW__API__SECRET_KEY: ${AIRFLOW_JWT_SECRET:?AIRFLOW_JWT_SECRET must be set}
+      AIRFLOW__API__BASE_URL: ${AIRFLOW_BASE_URL:-http://localhost:8080}
     volumes:
-      - ../src:/opt/airflow/src
       - airflow_logs:/opt/airflow/logs
     ports:
-      - "8080:8080"
-    command: airflow webserver
+      - "${AIRFLOW_PORT:-8080}:8080"
+    # Airflow 3: `airflow webserver` is replaced by `airflow api-server`.
+    command: airflow api-server
     depends_on:
       postgres:
-        condition: service_healthy
-      redis:
         condition: service_healthy
       airflow-scheduler:
         condition: service_started
     restart: always
     mem_limit: 512m
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
 
   airflow-init:
     container_name: pokedata-airflow-init
@@ -116,17 +143,22 @@ services:
       dockerfile: docker/Dockerfile.airflow
     image: pokedata-airflow:latest
     environment:
-      AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-pokemon_data}
-      AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-      _AIRFLOW_DB_UPGRADE: "true"
-      _AIRFLOW_WWW_USER_CREATE: "true"
-      _AIRFLOW_WWW_USER_USERNAME: admin
-      _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:-admin}
-    command: version
+      <<: *airflow-env
     depends_on:
       postgres:
         condition: service_healthy
+    # Airflow 3: migrate the metadata DB (`db migrate`, replaces `db init`) and
+    # create the admin user via the FAB provider. Admin password is required
+    # (no insecure default); `|| true` keeps re-running init idempotent.
+    command: >
+      bash -c "airflow db migrate &&
+      (airflow users create -r Admin
+      -u ${AIRFLOW_ADMIN_USERNAME:-admin}
+      -p ${AIRFLOW_ADMIN_PASSWORD:?AIRFLOW_ADMIN_PASSWORD must be set}
+      -e ${AIRFLOW_ADMIN_EMAIL:-admin@example.com}
+      -f ${AIRFLOW_ADMIN_FIRSTNAME:-Admin}
+      -l ${AIRFLOW_ADMIN_LASTNAME:-User} || true) &&
+      airflow pools set pokeapi_mirror ${MIRROR_POOL_SLOTS:-2} 'Throttle concurrent PokeAPI mirror tasks'"
 
   streamlit:
     container_name: pokedata-streamlit
@@ -136,7 +168,7 @@ services:
     image: pokedata-app:latest
     command: streamlit run src/analytics/dashboard.py
     ports:
-      - "8501:8501"
+      - "${STREAMLIT_PORT:-8501}:8501"
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-pokemon_data}
     depends_on:
@@ -147,5 +179,4 @@ services:
 
 volumes:
   postgres_data:
-  api_cache:
   airflow_logs:

@@ -1,24 +1,38 @@
-FROM apache/airflow:2.8.1-python3.10
+FROM apache/airflow:slim-3.2.2-python3.14
 
 USER root
 
-# Install system dependencies
+# curl is needed for the api-server healthcheck. No build tools required: every
+# dependency below ships a manylinux wheel for cp314, so nothing is compiled.
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-    build-essential \
-    libpq-dev \
-    curl \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+    apt-get install -y --no-install-recommends curl && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
 USER airflow
 
-# Copy requirements
-COPY requirements/base.txt requirements/base.txt
-COPY requirements/prod.txt requirements/prod.txt
+# Install the runtime libraries the src/* DAG code imports, plus the providers,
+# into the airflow user's environment (~/.local — the vendor-supported way to
+# extend the image). The slim base bundles NO providers, so the standard
+# provider (PythonOperator, used by the DAG) is installed explicitly.
+# The API client uses httpx + tenacity (not requests/backoff); redis is unused.
+# Versions are pinned to the exact resolutions in uv.lock for reproducibility.
+# After `make upgrade`, refresh these with `make airflow-pins` (prints lock pins).
+RUN pip install --no-cache-dir \
+        pandas==3.0.3 \
+        numpy==2.4.6 \
+        psycopg2-binary==2.9.12 \
+        httpx==0.28.1 \
+        tenacity==9.1.4 \
+        python-dotenv==1.2.2 \
+        apache-airflow-providers-standard==1.14.0 \
+        apache-airflow-providers-postgres==6.7.1 \
+        apache-airflow-providers-common-sql==2.0.1 \
+        apache-airflow-providers-fab==3.6.5
 
-# Install Python dependencies including Redis client
-RUN pip install --no-cache-dir -r requirements/prod.txt redis==5.0.1
+# Raw-JSON API cache dir, owned by the airflow user so a mounted volume here is
+# writable (the relative "cache" dir resolves to /opt/airflow/cache at runtime).
+RUN mkdir -p /opt/airflow/cache
 
 # Copy application code
 COPY src/ /opt/airflow/src/

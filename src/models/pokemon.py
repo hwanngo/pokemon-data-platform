@@ -1,6 +1,6 @@
 """Pokémon model definition."""
 
-from sqlalchemy import Column, Integer, String, Boolean, ForeignKey
+from sqlalchemy import Boolean, Column, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.orm import relationship
 
 from src.models.base import Base
@@ -29,6 +29,7 @@ class Pokemon(Base):
 
 class PokemonStat(Base):
     __tablename__ = "pokemon_stats"
+    __table_args__ = (UniqueConstraint("pokemon_id", "stat_name"),)
 
     id = Column(Integer, primary_key=True)
     pokemon_id = Column(Integer, ForeignKey("pokemon.id"), nullable=False)

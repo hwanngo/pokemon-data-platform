@@ -43,7 +43,6 @@ airflow/plugins/
 # Docker
 .docker/
 *.env
-.dockerignore
 
 # Database
 *.sqlite
@@ -96,3 +95,7 @@ ehthumbs.db
 Thumbs.db
 Desktop.ini
 .directory
+
+# Local dev notes / scratch (not committed)
+NOTES.local.md
+*.local.md

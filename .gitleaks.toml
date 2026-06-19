@@ -1,0 +1,38 @@
+# gitleaks config for pokemon-data-platform.
+# Extends the default ruleset and adds detectors for the secret formats this repo
+# actually uses (Airflow Fernet key / JWT secret), which the defaults miss.
+title = "pokedata gitleaks config"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "airflow-fernet-key"
+description = "Airflow Fernet key (32-byte url-safe base64)"
+# Fernet.generate_key() / urlsafe_b64encode(os.urandom(32)) -> 43 base64 chars + '='.
+regex = '''[A-Za-z0-9_-]{43}='''
+keywords = ["fernet"]
+[rules.allowlist]
+regexTarget = "match"
+# Allow the placeholder forms only (env-var refs and the empty template value).
+regexes = ['''\$\{[A-Z_]+''']
+
+[[rules]]
+id = "airflow-jwt-secret"
+description = "Hardcoded Airflow JWT / API secret value"
+regex = '''(?i)(JWT_SECRET|API__SECRET_KEY)\s*[:=]\s*['"]?[A-Za-z0-9_./+-]{12,}['"]?'''
+keywords = ["jwt_secret", "secret_key"]
+[rules.allowlist]
+regexTarget = "match"
+# Allow env-var indirection ( ${AIRFLOW_JWT_SECRET...} ), not literal values.
+regexes = ['''[:=]\s*['"]?\$\{''']
+
+# ---------------------------------------------------------------------------
+# Global allowlist: paths that legitimately contain high-entropy strings.
+# ---------------------------------------------------------------------------
+[allowlist]
+description = "Non-secret high-entropy content"
+paths = [
+    '''uv\.lock''',          # dependency hashes (sha256/blake2)
+    '''\.env\.example''',    # template with empty/placeholder values
+]
