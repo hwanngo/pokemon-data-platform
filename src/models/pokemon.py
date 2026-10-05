@@ -1,6 +1,6 @@
 """Pokémon model definition."""
 
-from sqlalchemy import Boolean, Column, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import Boolean, Column, ForeignKey, Index, Integer, String, UniqueConstraint
 from sqlalchemy.orm import relationship
 
 from src.models.base import Base
@@ -16,6 +16,8 @@ class Pokemon(Base):
     base_experience = Column(Integer)
     is_default = Column(Boolean, nullable=False)
     order_num = Column(Integer)
+    species_id = Column(Integer, ForeignKey("pokemon_species.id"))
+    __table_args__ = (Index("idx_pokemon_species", "species_id"),)
 
     # Relationships
     stats = relationship("PokemonStat", back_populates="pokemon")
@@ -29,7 +31,10 @@ class Pokemon(Base):
 
 class PokemonStat(Base):
     __tablename__ = "pokemon_stats"
-    __table_args__ = (UniqueConstraint("pokemon_id", "stat_name"),)
+    __table_args__ = (
+        UniqueConstraint("pokemon_id", "stat_name"),
+        Index("idx_pokemon_stats_pokemon_id", "pokemon_id"),
+    )
 
     id = Column(Integer, primary_key=True)
     pokemon_id = Column(Integer, ForeignKey("pokemon.id"), nullable=False)

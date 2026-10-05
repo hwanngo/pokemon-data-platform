@@ -1,8 +1,8 @@
-name: pokedata
+name: pokedata-dev
 
 # Shared Airflow environment (values come from the repo-root .env file).
 x-airflow-env: &airflow-env
-  AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-pokemon_data}
+  AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow_service:${AIRFLOW_DB_PASSWORD:?AIRFLOW_DB_PASSWORD must be set}@postgres:5432/airflow_meta
   AIRFLOW__CORE__EXECUTOR: LocalExecutor
   AIRFLOW__CORE__LOAD_EXAMPLES: "false"
   # Airflow 3: FAB auth manager provides user management / the `users create` CLI.
@@ -19,24 +19,46 @@ x-airflow-env: &airflow-env
 services:
   postgres:
     container_name: pokedata-postgres-dev
-    image: postgres:18-alpine
+    image: postgres:18.6-alpine3.24@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
       POSTGRES_DB: ${POSTGRES_DB:-pokemon_data}
+      APP_READER_PASSWORD: ${APP_READER_PASSWORD:?APP_READER_PASSWORD must be set}
+      APP_WRITER_PASSWORD: ${APP_WRITER_PASSWORD:?APP_WRITER_PASSWORD must be set}
+      AIRFLOW_DB_PASSWORD: ${AIRFLOW_DB_PASSWORD:?AIRFLOW_DB_PASSWORD must be set}
     volumes:
       # postgres:18+ stores data in a versioned subdir, so the volume mounts at
       # /var/lib/postgresql (not /var/lib/postgresql/data).
       - postgres_data:/var/lib/postgresql
-      - ../database/initdb/init.sh:/docker-entrypoint-initdb.d/init.sh
-      - ../database/initdb/schema.sql:/docker-entrypoint-initdb.d/schema.sql
-      - ../database/migrations:/docker-entrypoint-initdb.d/migrations
+      - ../database/initdb/init.sh:/docker-entrypoint-initdb.d/01-init.sh:ro
+      - ../database:/database:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-pokemon_data}"]
       interval: 5s
       timeout: 5s
       retries: 5
     mem_limit: 1g
+
+  app-migrate:
+    image: postgres:18.6-alpine3.24@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
+    environment:
+      PGHOST: postgres
+      PGUSER: ${POSTGRES_USER:-postgres}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      PGDATABASE: ${POSTGRES_DB:-pokemon_data}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-pokemon_data}
+      APP_READER_PASSWORD: ${APP_READER_PASSWORD:?APP_READER_PASSWORD must be set}
+      APP_WRITER_PASSWORD: ${APP_WRITER_PASSWORD:?APP_WRITER_PASSWORD must be set}
+      AIRFLOW_DB_PASSWORD: ${AIRFLOW_DB_PASSWORD:?AIRFLOW_DB_PASSWORD must be set}
+    volumes:
+      - ../database:/database:ro
+    command: ["sh", "/database/migrate.sh"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
 
   app:
     container_name: pokedata-app-dev
@@ -45,7 +67,8 @@ services:
       dockerfile: docker/Dockerfile.app
     image: pokedata-app:dev
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-pokemon_data}
+      DATABASE_URL: postgresql+psycopg2://pokemon_reader:${APP_READER_PASSWORD:?APP_READER_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-pokemon_data}
+      APP_ENV: dev
       API_BASE_URL: ${API_BASE_URL:-https://pokeapi.co/api/v2}
       API_RATE_LIMIT: ${API_RATE_LIMIT:-20}
       API_CONCURRENCY: ${API_CONCURRENCY:-8}
@@ -53,14 +76,20 @@ services:
     volumes:
       # The whole repo is mounted, so the client's cache/ dir lives at <repo>/cache.
       - ../:/app
+      - ../cache/dev:/app/cache
     command: uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
     depends_on:
-      postgres:
-        condition: service_healthy
+      app-migrate:
+        condition: service_completed_successfully
     mem_limit: 512m
     ports:
       # Override the host port to avoid conflicts, e.g. `APP_PORT=8001 make start`.
-      - "${APP_PORT:-8000}:8000"
+      - "127.0.0.1:${APP_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
 
   airflow-scheduler:
     container_name: pokedata-airflow-scheduler-dev
@@ -72,7 +101,8 @@ services:
       <<: *airflow-env
       AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
       PYTHONPATH: /opt/airflow:/opt/airflow/src:/opt/airflow/dags
-      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-pokemon_data}
+      DATABASE_URL: postgresql+psycopg2://pokemon_writer:${APP_WRITER_PASSWORD:?APP_WRITER_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-pokemon_data}
+      APP_ENV: dev
       API_BASE_URL: ${API_BASE_URL:-https://pokeapi.co/api/v2}
       API_RATE_LIMIT: ${API_RATE_LIMIT:-20}
       API_CONCURRENCY: ${API_CONCURRENCY:-8}
@@ -82,11 +112,13 @@ services:
       - airflow_logs:/opt/airflow/logs
       # Project-local raw-JSON cache (bind mount): fetched API responses persist
       # in <repo>/cache so re-runs re-ingest from disk without re-calling PokéAPI.
-      - ../cache:/opt/airflow/cache
+      - ../cache/dev:/opt/airflow/cache
     command: airflow scheduler
     depends_on:
-      postgres:
-        condition: service_healthy
+      app-migrate:
+        condition: service_completed_successfully
+      airflow-init:
+        condition: service_completed_successfully
     # LocalExecutor runs task processes here; pandas/numpy ETL tasks need headroom.
     mem_limit: 2g
 
@@ -107,8 +139,8 @@ services:
       - airflow_logs:/opt/airflow/logs
     command: airflow dag-processor
     depends_on:
-      postgres:
-        condition: service_healthy
+      app-migrate:
+        condition: service_completed_successfully
       airflow-init:
         condition: service_completed_successfully
     mem_limit: 512m
@@ -130,17 +162,15 @@ services:
       - ../src/dags:/opt/airflow/dags
       - airflow_logs:/opt/airflow/logs
     ports:
-      - "${AIRFLOW_PORT:-8080}:8080"
+      - "127.0.0.1:${AIRFLOW_PORT:-8080}:8080"
     # Airflow 3: `airflow webserver` is replaced by `airflow api-server`.
     command: airflow api-server
     depends_on:
-      postgres:
-        condition: service_healthy
-      airflow-scheduler:
-        condition: service_started
+      airflow-init:
+        condition: service_completed_successfully
     mem_limit: 1g
     healthcheck:
-      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8080/api/v2/monitor/health"]
       interval: 10s
       timeout: 10s
       retries: 5
@@ -153,20 +183,17 @@ services:
     image: pokedata-airflow:dev
     environment:
       <<: *airflow-env
+      AIRFLOW_ADMIN_USERNAME: ${AIRFLOW_ADMIN_USERNAME:-admin}
+      AIRFLOW_ADMIN_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:?AIRFLOW_ADMIN_PASSWORD must be set}
+      AIRFLOW_ADMIN_EMAIL: ${AIRFLOW_ADMIN_EMAIL:-admin@example.com}
+      AIRFLOW_ADMIN_FIRSTNAME: ${AIRFLOW_ADMIN_FIRSTNAME:-Admin}
+      AIRFLOW_ADMIN_LASTNAME: ${AIRFLOW_ADMIN_LASTNAME:-User}
+      MIRROR_POOL_SLOTS: ${MIRROR_POOL_SLOTS:-1}
     depends_on:
-      postgres:
-        condition: service_healthy
-    # Airflow 3: `airflow db init` is replaced by `airflow db migrate`.
-    # The admin user comes from .env; `|| true` keeps re-runs idempotent.
-    command: >
-      bash -c "airflow db migrate &&
-      (airflow users create -r Admin
-      -u ${AIRFLOW_ADMIN_USERNAME:-admin}
-      -p ${AIRFLOW_ADMIN_PASSWORD:-admin}
-      -e ${AIRFLOW_ADMIN_EMAIL:-admin@example.com}
-      -f ${AIRFLOW_ADMIN_FIRSTNAME:-Admin}
-      -l ${AIRFLOW_ADMIN_LASTNAME:-User} || true) &&
-      airflow pools set pokeapi_mirror ${MIRROR_POOL_SLOTS:-2} 'Throttle concurrent PokeAPI mirror tasks'"
+      app-migrate:
+        condition: service_completed_successfully
+    # Migrate metadata, create/check admin, then configure the task pool.
+    command: ["bash", "/opt/airflow/airflow-init.sh"]
 
 volumes:
   postgres_data:

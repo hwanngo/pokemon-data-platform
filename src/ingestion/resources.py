@@ -76,10 +76,14 @@ _CORE = [
             TableSpec("pokemon_stats", PokemonStat, ("pokemon_id", "stat_name")),
             TableSpec("pokemon_types", PokemonType, ("pokemon_id", "slot")),
             TableSpec("pokemon_abilities", PokemonAbility, ("pokemon_id", "ability_id")),
-            TableSpec("pokemon_moves", PokemonMove, ("pokemon_id", "move_id", "learn_method")),
+            TableSpec(
+                "pokemon_moves",
+                PokemonMove,
+                ("pokemon_id", "move_id", "version_group_id", "learn_method", "level_learned_at"),
+            ),
         ],
         ct.transform_pokemon,
-        ["type", "ability", "move"],
+        ["type", "ability", "move", "pokemon-species", "version-group"],
     ),
 ]
 

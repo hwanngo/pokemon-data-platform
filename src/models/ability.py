@@ -1,6 +1,6 @@
 """Ability model definitions."""
 
-from sqlalchemy import Boolean, Column, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Column, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 
 from src.models.base import Base
@@ -24,7 +24,11 @@ class Ability(Base):
 
 class PokemonAbility(Base):
     __tablename__ = "pokemon_abilities"
-    __table_args__ = (UniqueConstraint("pokemon_id", "ability_id"),)
+    __table_args__ = (
+        UniqueConstraint("pokemon_id", "ability_id"),
+        Index("idx_pokemon_abilities_pokemon_id", "pokemon_id"),
+        Index("idx_pokemon_abilities_ability_id", "ability_id"),
+    )
 
     id = Column(Integer, primary_key=True)
     pokemon_id = Column(Integer, ForeignKey("pokemon.id"), nullable=False)

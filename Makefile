@@ -3,8 +3,9 @@
 
 # Default Docker Compose environment (dev|prod) — override: `make up ENV=prod`.
 ENV ?= dev
-# All config lives in .env (see .env.example); --env-file makes it explicit.
-COMPOSE = docker compose -f docker/docker-compose.$(ENV).yml --env-file .env
+# Each environment has its own configuration and Compose project/volumes.
+ENV_FILE = .env.$(ENV)
+COMPOSE = docker compose -f docker/docker-compose.$(ENV).yml --env-file $(ENV_FILE)
 
 .DEFAULT_GOAL := help
 
@@ -29,13 +30,11 @@ lock: ## Re-resolve dependencies and update uv.lock
 
 upgrade: ## Bump every dependency to the latest compatible version
 	uv lock --upgrade
+	python3 docker/sync_airflow_pins.py
+	uv sync --all-extras --locked
 
-airflow-pins: ## Print uv.lock versions for the deps pinned in docker/Dockerfile.airflow
-	@uv run python -c "import tomllib; d=tomllib.load(open('uv.lock','rb')); \
-	pkgs={'pandas','numpy','psycopg2-binary','httpx','tenacity','python-dotenv', \
-	'apache-airflow-providers-standard','apache-airflow-providers-postgres', \
-	'apache-airflow-providers-common-sql','apache-airflow-providers-fab'}; \
-	[print(f\"{p['name']}=={p['version']}\") for p in sorted(d['package'], key=lambda x: x['name']) if p['name'] in pkgs]"
+airflow-pins: ## Check the Airflow image tag and requirements against uv.lock
+	python3 docker/sync_airflow_pins.py --check
 
 # --- Run the app -----------------------------------------------------------
 
@@ -92,29 +91,22 @@ _check-env:
 		exit 1; \
 	fi
 
-# Create .env from the template on first use, generating fresh Airflow secrets
-# (so no real secret is ever committed and each checkout gets unique keys).
+# Development secrets are generated once. Production configuration is explicit.
 _env:
-	@if [ ! -f .env ]; then \
-		cp .env.example .env; \
-		fk=$$(python3 -c "import base64,os;print(base64.urlsafe_b64encode(os.urandom(32)).decode())"); \
-		js=$$(python3 -c "import secrets;print(secrets.token_hex(32))"); \
-		sed -i.bak "s|^AIRFLOW_FERNET_KEY=.*|AIRFLOW_FERNET_KEY=$$fk|; s|^AIRFLOW_JWT_SECRET=.*|AIRFLOW_JWT_SECRET=$$js|" .env && rm -f .env.bak; \
-		echo "Created .env from .env.example with freshly generated Airflow secrets."; \
-	fi
+	@python3 docker/prepare_env.py $(ENV)
 
 start: _check-env _env ## Build & start the full stack, then print access URLs (was start.sh)
 	@echo "Starting Pokémon Data Analytics Platform in $(ENV) environment..."
 	$(COMPOSE) up -d --build
 	@echo ""
 	@echo "Services are starting. Access points:"
-	@echo "  - API:               http://localhost:$${APP_PORT:-8000}"
-	@echo "  - Airflow UI:        http://localhost:$${AIRFLOW_PORT:-8080}"
-	@if [ "$(ENV)" = "prod" ]; then echo "  - Streamlit:         http://localhost:$${STREAMLIT_PORT:-8501}"; fi
+	@app_port=$$(sed -n 's/^APP_PORT=//p' $(ENV_FILE) | tail -1); echo "  - API:               http://localhost:$${app_port:-8000}"
+	@airflow_port=$$(sed -n 's/^AIRFLOW_PORT=//p' $(ENV_FILE) | tail -1); echo "  - Airflow UI:        http://localhost:$${airflow_port:-8080}"
+	@if [ "$(ENV)" = "prod" ]; then streamlit_port=$$(sed -n 's/^STREAMLIT_PORT=//p' $(ENV_FILE) | tail -1); echo "  - Streamlit:         http://localhost:$${streamlit_port:-8501}"; fi
 	@echo ""
 	@echo "Tail logs with:  make logs ENV=$(ENV)"
 
-stop: _check-env _env ## Stop the stack and remove containers (was stop.sh)
+stop: _check-env ## Stop the stack and remove containers (was stop.sh)
 	@echo "Stopping Pokémon Data Platform services..."
 	$(COMPOSE) down
 
@@ -122,10 +114,10 @@ up: start ## Alias for `make start`
 
 down: stop ## Alias for `make stop`
 
-logs: _check-env _env ## Tail stack logs
+logs: _check-env ## Tail stack logs
 	$(COMPOSE) logs -f
 
-ps: _check-env _env ## Show running services
+ps: _check-env ## Show running services
 	$(COMPOSE) ps
 
 # --- Housekeeping ----------------------------------------------------------

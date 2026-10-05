@@ -23,6 +23,8 @@ MANIFEST
 
 # Python Virtual environments
 .env
+.env.dev
+.env.prod
 .venv
 env/
 venv/

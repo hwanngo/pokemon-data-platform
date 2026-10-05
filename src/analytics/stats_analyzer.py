@@ -1,6 +1,7 @@
 """Pokémon stats analyzer module."""
 
 import logging
+from collections import Counter, defaultdict
 
 import pandas as pd
 from sqlalchemy import text
@@ -21,8 +22,20 @@ class StatsAnalyzer:
         Args:
             db_session: SQLAlchemy database session. If None, a new one will be created.
         """
-        self.db = db_session if db_session else SessionLocal()
+        self._owns_session = db_session is None
+        self.db = db_session if db_session is not None else SessionLocal()
         logger.info("Initialized StatsAnalyzer")
+
+    def close(self) -> None:
+        """Close a session created by this analyzer; leave injected sessions to their owner."""
+        if self._owns_session:
+            self.db.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, _exc_type, _exc_value, _traceback):
+        self.close()
 
     def get_top_pokemon_by_total_base_stats(self, limit: int = 10) -> pd.DataFrame:
         """
@@ -38,8 +51,12 @@ class StatsAnalyzer:
         SELECT p.id, p.name, SUM(ps.base_value) as total_base_stats
         FROM pokemon p
         JOIN pokemon_stats ps ON p.id = ps.pokemon_id
+        WHERE NOT EXISTS (
+            SELECT 1 FROM api_resource ar
+            WHERE ar.resource_type = 'pokemon' AND ar.id = p.id AND ar.is_present = false
+        )
         GROUP BY p.id, p.name
-        ORDER BY total_base_stats DESC
+        ORDER BY total_base_stats DESC, p.id ASC
         LIMIT :limit
         """
 
@@ -60,6 +77,14 @@ class StatsAnalyzer:
         SELECT t.name as type_name, COUNT(pt.pokemon_id) as pokemon_count
         FROM types t
         JOIN pokemon_types pt ON t.id = pt.type_id
+        WHERE NOT EXISTS (
+            SELECT 1 FROM api_resource ar
+            WHERE ar.resource_type = 'type' AND ar.id = t.id AND ar.is_present = false
+        )
+          AND NOT EXISTS (
+            SELECT 1 FROM api_resource ar
+            WHERE ar.resource_type = 'pokemon' AND ar.id = pt.pokemon_id AND ar.is_present = false
+        )
         GROUP BY t.name
         ORDER BY pokemon_count DESC
         """
@@ -77,38 +102,45 @@ class StatsAnalyzer:
         Returns:
             DataFrame with counts of each type combination.
         """
-        query = """
-        WITH pokemon_types_agg AS (
-            SELECT
-                p.id,
-                p.name,
-                STRING_AGG(t.name, '/' ORDER BY pt.slot) as type_combination
+        rows = self.db.execute(
+            text("""
+            SELECT p.id, t.name
             FROM pokemon p
             JOIN pokemon_types pt ON p.id = pt.pokemon_id
             JOIN types t ON pt.type_id = t.id
-            GROUP BY p.id, p.name
-            HAVING COUNT(*) = 2  -- dual-type only; exclude single-type Pokémon
+            WHERE NOT EXISTS (
+                SELECT 1 FROM api_resource ar
+                WHERE ar.resource_type = 'pokemon' AND ar.id = p.id AND ar.is_present = false
+            )
+              AND NOT EXISTS (
+                SELECT 1 FROM api_resource ar
+                WHERE ar.resource_type = 'type' AND ar.id = t.id AND ar.is_present = false
+            )
+            ORDER BY p.id, pt.slot
+        """)
         )
-        SELECT
-            type_combination,
-            COUNT(*) as pokemon_count
-        FROM pokemon_types_agg
-        GROUP BY type_combination
-        ORDER BY pokemon_count DESC
-        """
-
-        result = self.db.execute(text(query))
-        df = pd.DataFrame(result.fetchall(), columns=["type_combination", "pokemon_count"])
+        types_by_pokemon: dict[int, list[str]] = defaultdict(list)
+        for pokemon_id, type_name in rows:
+            types_by_pokemon[pokemon_id].append(type_name)
+        counts = Counter("/".join(names) for names in types_by_pokemon.values() if len(names) == 2)
+        df = pd.DataFrame(
+            sorted(counts.items(), key=lambda item: (-item[1], item[0])),
+            columns=["type_combination", "pokemon_count"],
+        )
 
         logger.info("Retrieved dual-type combination analysis")
         return df
 
-    def get_pokemon_with_best_type_coverage(self, limit: int = 10) -> pd.DataFrame:
+    def get_pokemon_with_best_type_coverage(
+        self, limit: int = 10, version_group_id: int | None = None
+    ) -> pd.DataFrame:
         """
         Find Pokémon with the best move type coverage.
 
         Args:
             limit: Maximum number of Pokémon to return.
+            version_group_id: Restrict moves to one game version group. If omitted,
+                report the union across all known and legacy unscoped versions.
 
         Returns:
             DataFrame with Pokémon ranked by move type diversity.
@@ -119,10 +151,23 @@ class StatsAnalyzer:
                 pm.pokemon_id,
                 p.name as pokemon_name,
                 COUNT(DISTINCT m.type_id) as unique_move_types,
-                COUNT(m.id) as total_moves
+                COUNT(DISTINCT m.id) as total_moves
             FROM pokemon_moves pm
             JOIN pokemon p ON pm.pokemon_id = p.id
             JOIN moves m ON pm.move_id = m.id
+            WHERE (:version_group_id IS NULL OR pm.version_group_id = :version_group_id)
+              AND NOT EXISTS (
+                  SELECT 1 FROM api_resource ar
+                  WHERE ar.resource_type = 'pokemon' AND ar.id = p.id AND ar.is_present = false
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM api_resource ar
+                  WHERE ar.resource_type = 'move' AND ar.id = m.id AND ar.is_present = false
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM api_resource ar
+                  WHERE ar.resource_type = 'type' AND ar.id = m.type_id AND ar.is_present = false
+              )
             GROUP BY pm.pokemon_id, p.name
         )
         SELECT
@@ -130,14 +175,23 @@ class StatsAnalyzer:
             pokemon_name,
             unique_move_types,
             total_moves,
-            ROUND(CAST(unique_move_types AS NUMERIC) /
-                  (SELECT COUNT(*) FROM types), 2) as type_coverage_pct
+            ROUND(1.0 * unique_move_types /
+                  NULLIF((
+                      SELECT COUNT(*) FROM types t
+                      WHERE NOT EXISTS (
+                          SELECT 1 FROM api_resource ar
+                          WHERE ar.resource_type = 'type' AND ar.id = t.id
+                            AND ar.is_present = false
+                      )
+                  ), 0), 4) as type_coverage_ratio
         FROM move_types
-        ORDER BY unique_move_types DESC, total_moves DESC
+        ORDER BY unique_move_types DESC, total_moves DESC, pokemon_id ASC
         LIMIT :limit
         """
 
-        result = self.db.execute(text(query), {"limit": limit})
+        result = self.db.execute(
+            text(query), {"limit": limit, "version_group_id": version_group_id}
+        )
         df = pd.DataFrame(
             result.fetchall(),
             columns=[
@@ -145,7 +199,7 @@ class StatsAnalyzer:
                 "pokemon_name",
                 "unique_move_types",
                 "total_moves",
-                "type_coverage_pct",
+                "type_coverage_ratio",
             ],
         )
 

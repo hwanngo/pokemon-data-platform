@@ -54,7 +54,7 @@ def test_cache_filename_is_human_readable(httpx_mock, client, cache_dir):
     client.get("pokemon/1")
     client.get("move?limit=100000")
 
-    names = {p.name for p in Path(cache_dir).glob("*.json")}
+    names = {p.name for p in Path(cache_dir).rglob("*.json")}
     # readable, not a sha256 hash
     assert "pokemon__1.json" in names
     assert "move_limit_100000.json" in names

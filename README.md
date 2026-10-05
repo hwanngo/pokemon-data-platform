@@ -13,10 +13,10 @@ PostgreSQL · Apache Airflow 3 · Streamlit + Plotly · httpx · Docker
 
 - **ETL pipeline** — extract from PokéAPI, transform to a normalized schema, load into PostgreSQL.
 - **Apache Airflow orchestration** — one config-driven DAG (`pokeapi_mirror`) ingests every resource in dependency order.
-- **Concurrent, rate-limited, cached ingestion** — a thread pool saturates the network under a thread-safe rate limiter, with tenacity retries and readable on-disk JSON caching (re-runs hit the cache, not the API).
+- **Concurrent, rate-limited, cached ingestion** — a thread pool fetches under a shared rate limiter, with retries and on-disk JSON caching governed by the mirror refresh policy.
 - **REST API** (FastAPI) — query Pokémon and run analytics endpoints.
 - **Interactive dashboard** (Streamlit) — stats rankings, type distribution, and the type-effectiveness matrix.
-- **Reproducible environments** — every dependency pinned in `uv.lock`; one-command Docker stack.
+- **Reproducible Python environments** — dependencies are pinned in `uv.lock`; Docker images require separate build validation.
 
 ---
 
@@ -78,21 +78,33 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 ```bash
 make start            # build + start the dev stack (ENV=dev by default)
-make start ENV=prod   # production compose
 make logs             # tail logs
 make stop             # stop everything
 ```
 
+`make start` creates `.env.dev` with fresh database, Airflow and administrator
+credentials. The host ports bind to loopback. The API is available at
+`http://localhost:8000/docs`; Airflow is at `http://localhost:8080`.
+
+For production, create `.env.prod` from `.env.example`, fill every blank secret
+with a unique value, set the host ports and Airflow base URL, then run
+`make start ENV=prod`. Passwords must have at least 20 URL-safe characters;
+the Fernet key must decode to 32 bytes and the JWT secret must have at least
+32 characters. Production never generates
+credentials implicitly. The supplied host ports bind to loopback; configure
+an authenticated TLS reverse proxy if remote access is required.
+
 Services:
 
-| Service   | URL                     |
+| Service   | Local URL                     |
 |-----------|-------------------------|
 | REST API  | http://localhost:8000   |
 | Airflow   | http://localhost:8080   |
-| Streamlit | http://localhost:8501 (prod) |
+| Streamlit | http://localhost:8501 (prod only) |
 
-> The database schema is created automatically from `database/initdb/schema.sql`
-> on first Postgres startup.
+> PostgreSQL initializes the schema on a new volume. `app-migrate` applies
+> versioned application migrations on every startup before app and Airflow tasks.
+> Airflow migrates its separate metadata database during `airflow-init`.
 
 ---
 
@@ -107,8 +119,10 @@ make check            # format-check + lint + typecheck + test
 ```
 
 `make install` creates a `.venv/`; run any command inside it with `uv run <cmd>`.
-A reachable PostgreSQL is required — point `DATABASE_URL` at one (see
-[Configuration](#configuration)) or use the Docker `postgres` service.
+A reachable PostgreSQL is required. Set `DATABASE_URL` explicitly or export all
+of `POSTGRES_USER`, `POSTGRES_PASSWORD`, and `POSTGRES_DB` (plus optional
+`POSTGRES_HOST`/`POSTGRES_PORT`). Compose uses its own service-network URLs;
+local Python does not infer credentials from `.env.dev`.
 
 ---
 
@@ -151,17 +165,18 @@ uv run python -m src.main mirror --only nature,berry   # a subset (FK deps auto-
 > A full mirror is **thousands** of requests. Detail records are fetched
 > **concurrently** (a thread pool, `API_CONCURRENCY`, default 8) under a
 > thread-safe rate limiter (`API_RATE_LIMIT`), so raising both makes it much
-> faster. Raw responses are cached as readable JSON in `./cache`
-> (`<resource>__<id>.json`), so re-runs re-ingest from disk with no repeated API
-> calls. The `pokeapi_mirror` Airflow DAG runs it weekly (one task per resource,
-> dependency-ordered). Query the tail with JSONB, e.g.
+> faster. Raw responses are cached as readable JSON in environment-specific
+> `cache/` directories; scheduled runs refresh source data under the mirror's
+> freshness policy. The `pokeapi_mirror` Airflow DAG runs weekly (one task per
+> resource, dependency-ordered). Query the tail with JSONB, e.g.
 > `SELECT data->>'flavor_text' FROM api_resource WHERE resource_type='berry-flavor'`.
 
 ### REST API
 
 | Method & path                              | Description                              |
 |--------------------------------------------|------------------------------------------|
-| `GET /`                                    | Health/welcome message                   |
+| `GET /`                                    | Welcome message                          |
+| `GET /health/ready`                        | Database-backed readiness                |
 | `GET /pokemon?skip=&limit=`                | List Pokémon with their types            |
 | `GET /pokemon/{id}`                        | One Pokémon with stats and types         |
 | `GET /analytics/top-pokemon?limit=`        | Top Pokémon by total base stats          |
@@ -207,7 +222,8 @@ Run `make help` for the full list. Highlights:
 |-----------------|--------------------------------------------------------|
 | `install`       | Create the venv and install all deps                   |
 | `sync` / `lock` | Sync to / regenerate `uv.lock`                         |
-| `upgrade`       | Bump every dependency to the latest compatible version |
+| `upgrade`       | Re-resolve and sync all extras; export locked Airflow requirements |
+| `airflow-pins`  | Check the Airflow image against `uv.lock`              |
 | `api`           | Run the FastAPI server                                  |
 | `dashboard`     | Run the Streamlit dashboard                             |
 | `fetch`         | Fetch + load all PokéAPI data                          |
@@ -223,31 +239,53 @@ Run `make help` for the full list. Highlights:
 
 ## Configuration
 
-All configuration lives in a single **`.env`** file at the repo root. Copy the
-template and edit as needed (`make start` auto-creates `.env` from it on first run):
+Compose uses separate `.env.dev` and `.env.prod` files. Development bootstrap
+creates `.env.dev` automatically. Production configuration is explicit:
 
 ```bash
-cp .env.example .env
+cp .env.example .env.prod
+# Fill POSTGRES_PASSWORD, APP_READER_PASSWORD, APP_WRITER_PASSWORD,
+# AIRFLOW_DB_PASSWORD, AIRFLOW_FERNET_KEY, AIRFLOW_JWT_SECRET,
+# AIRFLOW_ADMIN_PASSWORD with unique secrets before `make start ENV=prod`.
 ```
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `APP_PORT` / `AIRFLOW_PORT` / `STREAMLIT_PORT` | `8000` / `8080` / `8501` | Host ports (change to avoid conflicts) |
-| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | `postgres` / `postgres` / `pokemon_data` | Database credentials |
+| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | `postgres` / required / `pokemon_data` | Migration owner; never used by public readers |
+| `APP_READER_PASSWORD` / `APP_WRITER_PASSWORD` | required | Separate read and ingestion roles |
+| `AIRFLOW_DB_PASSWORD` | required | Role for separate Airflow metadata database |
 | `API_BASE_URL` / `API_RATE_LIMIT` / `API_CONCURRENCY` / `LOG_LEVEL` | PokéAPI / `20` / `8` / `INFO` | Ingestion (rate + concurrent fetch) + app |
-| `AIRFLOW_FERNET_KEY` / `AIRFLOW_JWT_SECRET` | generated by `make _env` | Airflow encryption + api-server auth (no in-repo default) |
-| `AIRFLOW_ADMIN_USERNAME` / `AIRFLOW_ADMIN_PASSWORD` / `AIRFLOW_ADMIN_EMAIL` | `admin` / `admin` / … | Airflow admin user |
+| `AIRFLOW_FERNET_KEY` / `AIRFLOW_JWT_SECRET` | generated for dev; required for prod | Airflow encryption + API auth |
+| `AIRFLOW_ADMIN_USERNAME` / `AIRFLOW_ADMIN_PASSWORD` / `AIRFLOW_ADMIN_EMAIL` | `admin` / required / … | Airflow admin user |
+| `MIRROR_POOL_SLOTS` | `1` | Concurrent Airflow mirror tasks |
+| `DATABASE_URL` | unset for local Python | Full local connection URL; optional if all POSTGRES_* values are exported |
 
-`DATABASE_URL` and Airflow's connection string are composed from the `POSTGRES_*`
-values, so you only set the credentials once. Shell variables override `.env`
-(e.g. `APP_PORT=8001 make start`).
+Passwords used in Compose connection URLs must contain at least 20 URL-safe
+characters (`A-Z`, `a-z`, `0-9`, `.`, `_`, `~`, `-`). `make start` validates this
+before Docker runs. Values in the environment may override the file during
+Compose interpolation; review your shell environment when troubleshooting.
 
-> **Security:** `.env` is gitignored and there are **no secret defaults in the
-> compose files** — `make _env` generates a fresh Fernet key + JWT secret into
-> `.env` on first run. Both dev and prod compose require `AIRFLOW_FERNET_KEY` and
-> `AIRFLOW_JWT_SECRET` (and prod additionally requires `AIRFLOW_ADMIN_PASSWORD` /
-> `POSTGRES_PASSWORD`) — they fail loudly if missing. Generate a Fernet key
-> manually via `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`.
+`API_RATE_LIMIT` is enforced by each ingestion process. The default
+`MIRROR_POOL_SLOTS=1` keeps the scheduled mirror within that request-per-minute
+budget. Raising pool slots can multiply the total request rate; divide
+`API_RATE_LIMIT` across concurrent tasks if you increase the pool size.
+
+The repository ignores both env files and excludes them from Docker build
+contexts. For a production Fernet key, use
+`python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`.
+For other secrets, `python -c "import secrets; print(secrets.token_urlsafe(36))"`
+produces a suitable value. Store secrets in a restricted manager for a real
+deployment; Compose environment variables are visible to operators with Docker
+access.
+
+Dev and prod have different Compose project names, PostgreSQL/log volumes and
+cache paths. Changing `ENV` does not migrate data between them. Before upgrades,
+back up both the application database and Airflow metadata with `pg_dump`, then
+verify restore into a disposable volume. Keep the previous image/lockfile for
+rollback, apply application migrations with `app-migrate`, and validate
+`/health/ready` plus Airflow's `/api/v2/monitor/health` before reopening ingress.
+Do not use `docker compose down -v` on data you intend to keep.
 
 ---
 
@@ -259,8 +297,26 @@ make cov          # pytest with coverage report
 make check        # format-check, lint, typecheck, and tests
 ```
 
+CI also builds Python distributions and both Docker images. Its application
+image check confirms a dummy local `.env` is absent. An opt-in CI job tests
+fresh and legacy-schema migrations plus reader/writer grants against a disposable
+PostgreSQL 18 service. The application builder and PostgreSQL images use
+reviewed digest references; update those deliberately when patching images.
+A successful image build does not replace a full Airflow startup and restore test.
+
+The locked Airflow release is 3.3.2, which resolves the advisories recorded in
+`PROJECT_AUDIT.md` (AUDIT-DEP-001). Airflow 3.3 caps FastAPI below 0.137, so
+the shared lockfile holds FastAPI on the newest 0.136.x release. Airflow
+upgrades must move the lockfile, Airflow image and provider pins together and
+pass migration, DAG import and role-based smoke tests. On a host with
+package-registry access, run `make upgrade`, then
+`make check` and the Docker/CI checks. The upgrade target now derives the
+Airflow image version and complete hashed requirements from the resolved
+lockfile; CI rejects drift between them. Review the resolved packages and image
+before deployment.
+
 ---
 
 ## License
 
-MIT
+[MIT](LICENSE)

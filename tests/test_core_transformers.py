@@ -81,12 +81,18 @@ def test_transform_pokemon_fans_out_to_five_tables():
                 "move": {"url": f"{BASE}/move/33/"},
                 "version_group_details": [
                     {
-                        "version_group": {"name": "scarlet-violet"},
+                        "version_group": {
+                            "name": "scarlet-violet",
+                            "url": f"{BASE}/version-group/25/",
+                        },
                         "level_learned_at": 1,
                         "move_learn_method": {"name": "level-up"},
                     },
                     {
-                        "version_group": {"name": "scarlet-violet"},
+                        "version_group": {
+                            "name": "scarlet-violet",
+                            "url": f"{BASE}/version-group/25/",
+                        },
                         "level_learned_at": 0,
                         "move_learn_method": {"name": "machine"},
                     },

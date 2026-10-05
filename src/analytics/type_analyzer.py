@@ -22,8 +22,20 @@ class TypeAnalyzer:
         Args:
             db_session: SQLAlchemy database session. If None, a new one will be created.
         """
-        self.db = db_session if db_session else SessionLocal()
+        self._owns_session = db_session is None
+        self.db = db_session if db_session is not None else SessionLocal()
         logger.info("Initialized TypeAnalyzer")
+
+    def close(self) -> None:
+        """Close a session created by this analyzer; leave injected sessions to their owner."""
+        if self._owns_session:
+            self.db.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, _exc_type, _exc_value, _traceback):
+        self.close()
 
     def get_effectiveness_matrix(self) -> pd.DataFrame:
         """
@@ -42,30 +54,36 @@ class TypeAnalyzer:
         JOIN types dt ON te.defense_type_id = dt.id
         """
 
-        result = self.db.execute(text(query))
-        df_flat = pd.DataFrame(
-            result.fetchall(), columns=["attacking_type", "defending_type", "effectiveness"]
-        )
-
-        # Convert to pivot table (matrix form)
-        matrix = df_flat.pivot(
-            index="attacking_type", columns="defending_type", values="effectiveness"
-        )
-
-        # Fill NaN values with 1.0 (neutral effectiveness)
-        matrix = matrix.fillna(1.0)
+        type_names = [
+            row[0]
+            for row in self.db.execute(
+                text("""
+                SELECT t.name FROM types t
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM api_resource ar
+                    WHERE ar.resource_type = 'type' AND ar.id = t.id AND ar.is_present = false
+                )
+                ORDER BY t.name
+            """)
+            )
+        ]
+        matrix = pd.DataFrame(1.0, index=type_names, columns=type_names)
+        for attack, defense, effectiveness in self.db.execute(text(query)):
+            if attack in matrix.index and defense in matrix.columns:
+                matrix.loc[attack, defense] = float(effectiveness)
 
         logger.info("Generated type effectiveness matrix")
         return matrix
 
-    def find_best_attacking_types(self) -> pd.DataFrame:
+    def find_best_attacking_types(self, matrix: pd.DataFrame | None = None) -> pd.DataFrame:
         """
         Find the best attacking types based on overall effectiveness.
 
         Returns:
             DataFrame with types ranked by offensive potential.
         """
-        matrix = self.get_effectiveness_matrix()
+        if matrix is None:
+            matrix = self.get_effectiveness_matrix()
 
         # Calculate average effectiveness and super effective count
         results = []
@@ -84,20 +102,24 @@ class TypeAnalyzer:
                 }
             )
 
-        df = pd.DataFrame(results)
+        df = pd.DataFrame(
+            results,
+            columns=["type", "avg_effectiveness", "super_effective_count", "no_effect_count"],
+        )
         df = df.sort_values(by=["super_effective_count", "avg_effectiveness"], ascending=False)
 
         logger.info("Ranked attacking types by effectiveness")
         return df
 
-    def find_best_defensive_types(self) -> pd.DataFrame:
+    def find_best_defensive_types(self, matrix: pd.DataFrame | None = None) -> pd.DataFrame:
         """
         Find the best defensive types based on resistances.
 
         Returns:
             DataFrame with types ranked by defensive potential.
         """
-        matrix = self.get_effectiveness_matrix()
+        if matrix is None:
+            matrix = self.get_effectiveness_matrix()
 
         # Calculate for each defending type
         results = []
@@ -118,7 +140,16 @@ class TypeAnalyzer:
                 }
             )
 
-        df = pd.DataFrame(results)
+        df = pd.DataFrame(
+            results,
+            columns=[
+                "type",
+                "avg_effectiveness_against",
+                "weaknesses_count",
+                "resistances_count",
+                "immunities_count",
+            ],
+        )
         # Lower avg_effectiveness_against is better for defense
         df = df.sort_values(
             by=["immunities_count", "resistances_count", "avg_effectiveness_against"],
@@ -128,7 +159,9 @@ class TypeAnalyzer:
         logger.info("Ranked defensive types by resistances")
         return df
 
-    def get_pokemon_weakness_profile(self, pokemon_id: int) -> pd.DataFrame:
+    def get_pokemon_weakness_profile(
+        self, pokemon_id: int, matrix: pd.DataFrame | None = None
+    ) -> pd.DataFrame:
         """
         Generate a weakness/resistance profile for a specific Pokémon.
 
@@ -142,8 +175,17 @@ class TypeAnalyzer:
         type_query = """
         SELECT t.name
         FROM pokemon_types pt
+        JOIN pokemon p ON pt.pokemon_id = p.id
         JOIN types t ON pt.type_id = t.id
         WHERE pt.pokemon_id = :pokemon_id
+          AND NOT EXISTS (
+              SELECT 1 FROM api_resource ar
+              WHERE ar.resource_type = 'pokemon' AND ar.id = p.id AND ar.is_present = false
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM api_resource ar
+              WHERE ar.resource_type = 'type' AND ar.id = t.id AND ar.is_present = false
+          )
         ORDER BY pt.slot
         """
 
@@ -152,10 +194,11 @@ class TypeAnalyzer:
 
         if not pokemon_types:
             logger.warning(f"No types found for Pokémon ID {pokemon_id}")
-            return pd.DataFrame()
+            return pd.DataFrame(columns=["attacking_type", "effectiveness"])
 
         # Get the full effectiveness matrix
-        matrix = self.get_effectiveness_matrix()
+        if matrix is None:
+            matrix = self.get_effectiveness_matrix()
 
         # Calculate the combined effectiveness against this Pokémon
         effectiveness_against = {}
@@ -175,15 +218,15 @@ class TypeAnalyzer:
 
         df = df.sort_values(by="effectiveness", ascending=False)
 
-        # Get Pokémon name for better logging
-        name_query = "SELECT name FROM pokemon WHERE id = :pokemon_id"
-        name_row = self.db.execute(text(name_query), {"pokemon_id": pokemon_id}).fetchone()
-        pokemon_name = name_row[0] if name_row else f"#{pokemon_id}"
-
-        logger.info(f"Generated weakness profile for {pokemon_name} (ID: {pokemon_id})")
+        logger.info("Generated weakness profile for Pokémon ID %s", pokemon_id)
         return df
 
-    def recommend_counter_types(self, pokemon_id: int, top_n: int = 5) -> pd.DataFrame:
+    def recommend_counter_types(
+        self,
+        pokemon_id: int,
+        top_n: int = 5,
+        weakness_profile: pd.DataFrame | None = None,
+    ) -> pd.DataFrame:
         """
         Recommend the best types to counter a specific Pokémon.
 
@@ -194,13 +237,16 @@ class TypeAnalyzer:
         Returns:
             DataFrame with recommended counter types.
         """
-        weakness_profile = self.get_pokemon_weakness_profile(pokemon_id)
+        if top_n < 1:
+            raise ValueError("top_n must be positive")
+        if weakness_profile is None:
+            weakness_profile = self.get_pokemon_weakness_profile(pokemon_id)
 
         if weakness_profile.empty:
-            return pd.DataFrame()
+            return pd.DataFrame(columns=["attacking_type", "effectiveness", "description"])
 
         # Get only super effective types (effectiveness > 1.0)
-        counters = weakness_profile[weakness_profile["effectiveness"] > 1.0]
+        counters = weakness_profile[weakness_profile["effectiveness"] > 1.0].copy()
         counters = counters.sort_values(by="effectiveness", ascending=False)
 
         # Limit to top_n results
@@ -218,12 +264,5 @@ class TypeAnalyzer:
 
         counters["description"] = counters["effectiveness"].apply(get_effectiveness_label)
 
-        # Get Pokémon name
-        name_query = "SELECT name FROM pokemon WHERE id = :pokemon_id"
-        name_row = self.db.execute(text(name_query), {"pokemon_id": pokemon_id}).fetchone()
-        pokemon_name = name_row[0] if name_row else f"#{pokemon_id}"
-
-        logger.info(
-            f"Recommended {len(counters)} counter types for {pokemon_name} (ID: {pokemon_id})"
-        )
+        logger.info("Recommended %s counter types for Pokémon ID %s", len(counters), pokemon_id)
         return counters

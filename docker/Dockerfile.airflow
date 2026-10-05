@@ -1,4 +1,4 @@
-FROM apache/airflow:slim-3.2.2-python3.14
+FROM apache/airflow:slim-3.3.2-python3.14
 
 USER root
 
@@ -11,24 +11,16 @@ RUN apt-get update && \
 
 USER airflow
 
-# Install the runtime libraries the src/* DAG code imports, plus the providers,
-# into the airflow user's environment (~/.local — the vendor-supported way to
-# extend the image). The slim base bundles NO providers, so the standard
-# provider (PythonOperator, used by the DAG) is installed explicitly.
-# The API client uses httpx + tenacity (not requests/backoff); redis is unused.
-# Versions are pinned to the exact resolutions in uv.lock for reproducibility.
-# After `make upgrade`, refresh these with `make airflow-pins` (prints lock pins).
-RUN pip install --no-cache-dir \
-        pandas==3.0.3 \
-        numpy==2.4.6 \
-        psycopg2-binary==2.9.12 \
-        httpx==0.28.1 \
-        tenacity==9.1.4 \
-        python-dotenv==1.2.2 \
-        apache-airflow-providers-standard==1.14.0 \
-        apache-airflow-providers-postgres==6.7.1 \
-        apache-airflow-providers-common-sql==2.0.1 \
-        apache-airflow-providers-fab==3.6.5
+# Install the Airflow extra and core application runtime using the complete
+# hashed resolution exported from uv.lock. This also brings any packages already
+# present in the base image to the locked versions instead of resolving their
+# transitive dependencies independently at image-build time.
+COPY docker/airflow-requirements.txt /tmp/airflow-requirements.txt
+RUN pip install --no-cache-dir --no-deps --require-hashes -r /tmp/airflow-requirements.txt
+
+# Fail the image build if the provider installation leaves an inconsistent
+# dependency environment (the Airflow base image has its own constraints).
+RUN pip check
 
 # Raw-JSON API cache dir, owned by the airflow user so a mounted volume here is
 # writable (the relative "cache" dir resolves to /opt/airflow/cache at runtime).
@@ -36,6 +28,7 @@ RUN mkdir -p /opt/airflow/cache
 
 # Copy application code
 COPY src/ /opt/airflow/src/
+COPY docker/airflow-init.sh /opt/airflow/airflow-init.sh
 
 # Set environment variables
 ENV PYTHONPATH=/opt/airflow

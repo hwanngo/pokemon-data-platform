@@ -6,8 +6,6 @@ from typing import Any
 
 from src.transformation.utils import extract_id_from_url
 
-_PREFERRED_VERSION_GROUPS = ("scarlet-violet", "sword-shield", "sun-moon", "x-y")
-
 
 def transform_ability(raw: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
     effect_entries = raw.get("effect_entries", [])
@@ -76,6 +74,9 @@ def transform_pokemon(raw: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
         "base_experience": raw.get("base_experience"),
         "is_default": raw["is_default"],
         "order_num": raw.get("order"),
+        "species_id": extract_id_from_url(raw["species"]["url"])
+        if (raw.get("species") or {}).get("url")
+        else None,
     }
     stats = [
         {"pokemon_id": pid, "stat_name": s["stat"]["name"], "base_value": s["base_stat"]}
@@ -95,34 +96,28 @@ def transform_pokemon(raw: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
         for a in raw.get("abilities", [])
     ]
 
-    # Moves: one row per distinct learn method in a single chosen version group.
-    # NB: level_learned_at is the FIRST detail row seen for a (move, method) in that
-    # version group — if the same move/method recurs at different levels it is not
-    # deterministic which level wins (a data-fidelity caveat for analytics consumers).
+    # Keep source version and level provenance; consumers select a game explicitly.
     moves = []
+    seen_moves: set[tuple[int, int | None, str, int]] = set()
     for move_entry in raw.get("moves", []):
         move_id = extract_id_from_url(move_entry["move"]["url"])
-        details = move_entry.get("version_group_details", [])
-        if not details:
-            continue
-        vg_names = [d["version_group"]["name"] for d in details]
-        target_vg = next(
-            (vg for vg in _PREFERRED_VERSION_GROUPS if vg in vg_names),
-            details[0]["version_group"]["name"],
-        )
-        seen_methods: set[str] = set()
-        for d in details:
-            if d["version_group"]["name"] != target_vg:
-                continue
+        for d in move_entry.get("version_group_details", []):
             method = d["move_learn_method"]["name"]
-            if method in seen_methods:
+            vg_url = d["version_group"].get("url")
+            if not vg_url:
+                raise ValueError("move version group URL is required for provenance")
+            vg_id = extract_id_from_url(vg_url)
+            level = d["level_learned_at"]
+            key = (move_id, vg_id, method, level)
+            if key in seen_moves:
                 continue
-            seen_methods.add(method)
+            seen_moves.add(key)
             moves.append(
                 {
                     "pokemon_id": pid,
                     "move_id": move_id,
-                    "level_learned_at": d["level_learned_at"],
+                    "version_group_id": vg_id,
+                    "level_learned_at": level,
                     "learn_method": method,
                 }
             )

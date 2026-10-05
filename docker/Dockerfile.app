@@ -2,7 +2,7 @@
 # Application image (FastAPI API + CLI), built and run with uv on Alpine.
 # All runtime deps (numpy, pandas, pyarrow, psycopg2-binary, uvloop, …) ship
 # cp314 musllinux wheels, so no compiler/source build is needed.
-FROM ghcr.io/astral-sh/uv:python3.14-alpine AS base
+FROM ghcr.io/astral-sh/uv:0.12.23-python3.14-alpine@sha256:5bad981cb914722a38eb1f9de538194f14d03c5f104d3b30f19239327d57eb50 AS base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -26,7 +26,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-install-project --no-dev --extra prod
 
 # 2) Install the project itself.
-COPY . .
+COPY README.md ./
+COPY src/ ./src/
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --extra prod
 

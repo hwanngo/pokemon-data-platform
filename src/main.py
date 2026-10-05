@@ -2,9 +2,12 @@
 
 import argparse
 import logging
+import os
 
-from fastapi import Depends, FastAPI, HTTPException, Query
-from sqlalchemy import text
+from fastapi import Depends, FastAPI, HTTPException, Path, Query
+from pydantic import BaseModel
+from sqlalchemy import bindparam, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from src.analytics.stats_analyzer import StatsAnalyzer
@@ -16,8 +19,12 @@ from src.models.base import get_db, session_scope
 CORE_RESOURCES = ["type", "ability", "move", "pokemon"]
 
 # Configure logging
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+if LOG_LEVEL not in {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"}:
+    raise ValueError(f"Invalid LOG_LEVEL: {LOG_LEVEL}")
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    level=getattr(logging, LOG_LEVEL),
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
 
@@ -29,43 +36,107 @@ app = FastAPI(
 )
 
 
+class PokemonSummary(BaseModel):
+    id: int
+    name: str
+    height: int
+    weight: int
+    types: list[str]
+
+
+class PokemonDetail(PokemonSummary):
+    base_experience: int | None
+    stats: dict[str, int]
+
+
+class TopPokemon(BaseModel):
+    id: int
+    name: str
+    total_base_stats: int
+
+
+class TypeDistribution(BaseModel):
+    type_name: str
+    pokemon_count: int
+
+
+class CounterType(BaseModel):
+    attacking_type: str
+    effectiveness: float
+    description: str
+
+
 @app.get("/")
 def read_root():
     """Root endpoint."""
     return {"message": "Welcome to the Pokémon Data Analytics API"}
 
 
-@app.get("/pokemon")
+@app.get("/health/ready")
+def read_ready(db: Session = Depends(get_db)):
+    """Check whether the database can answer reads."""
+    try:
+        db.execute(text("SELECT 1"))
+    except SQLAlchemyError:
+        logger.exception("Database readiness check failed")
+        raise HTTPException(status_code=503, detail="Database unavailable") from None
+    return {"status": "ready"}
+
+
+@app.get("/pokemon", response_model=list[PokemonSummary])
 def get_pokemon_list(
     skip: int = Query(0, ge=0),
     limit: int = Query(10, ge=1, le=100),
     db: Session = Depends(get_db),
 ):
     """Get a list of Pokémon."""
-    pokemon_list = list(
-        db.execute(
-            text("""
-        SELECT p.id, p.name, p.height, p.weight,
-               array_remove(array_agg(DISTINCT t.name), NULL) as types
-        FROM pokemon p
-        LEFT JOIN pokemon_types pt ON p.id = pt.pokemon_id
-        LEFT JOIN types t ON pt.type_id = t.id
-        GROUP BY p.id, p.name, p.height, p.weight
-        ORDER BY p.id
-        LIMIT :limit OFFSET :skip
-    """),
-            {"skip": skip, "limit": limit},
-        )
+    pokemon_list = db.execute(
+        text("""
+            SELECT p.id, p.name, p.height, p.weight
+            FROM pokemon p
+            WHERE NOT EXISTS (
+                SELECT 1 FROM api_resource ar
+                WHERE ar.resource_type = 'pokemon' AND ar.id = p.id AND ar.is_present = false
+            )
+            ORDER BY p.id
+            LIMIT :limit OFFSET :skip
+        """),
+        {"skip": skip, "limit": limit},
+    ).all()
+    if not pokemon_list:
+        return []
+    ids = [row.id for row in pokemon_list]
+    type_rows = db.execute(
+        text("""
+            SELECT pt.pokemon_id, t.name
+            FROM pokemon_types pt
+            JOIN types t ON pt.type_id = t.id
+            WHERE pt.pokemon_id IN :ids
+              AND NOT EXISTS (
+                  SELECT 1 FROM api_resource ar
+                  WHERE ar.resource_type = 'type' AND ar.id = t.id AND ar.is_present = false
+              )
+            ORDER BY pt.pokemon_id, pt.slot
+        """).bindparams(bindparam("ids", expanding=True)),
+        {"ids": ids},
     )
-
+    types_by_id: dict[int, list[str]] = {pokemon_id: [] for pokemon_id in ids}
+    for pokemon_id, type_name in type_rows:
+        types_by_id[pokemon_id].append(type_name)
     return [
-        {"id": p[0], "name": p[1], "height": p[2], "weight": p[3], "types": p[4]}
-        for p in pokemon_list
+        {
+            "id": row.id,
+            "name": row.name,
+            "height": row.height,
+            "weight": row.weight,
+            "types": types_by_id[row.id],
+        }
+        for row in pokemon_list
     ]
 
 
-@app.get("/pokemon/{pokemon_id}")
-def get_pokemon(pokemon_id: int, db: Session = Depends(get_db)):
+@app.get("/pokemon/{pokemon_id}", response_model=PokemonDetail)
+def get_pokemon(pokemon_id: int = Path(ge=1), db: Session = Depends(get_db)):
     """Get detailed information about a specific Pokémon."""
     # Get basic Pokémon data
     pokemon = db.execute(
@@ -73,6 +144,10 @@ def get_pokemon(pokemon_id: int, db: Session = Depends(get_db)):
         SELECT p.id, p.name, p.height, p.weight, p.base_experience
         FROM pokemon p
         WHERE p.id = :pokemon_id
+          AND NOT EXISTS (
+              SELECT 1 FROM api_resource ar
+              WHERE ar.resource_type = 'pokemon' AND ar.id = p.id AND ar.is_present = false
+          )
     """),
         {"pokemon_id": pokemon_id},
     ).first()
@@ -97,6 +172,10 @@ def get_pokemon(pokemon_id: int, db: Session = Depends(get_db)):
         FROM pokemon_types pt
         JOIN types t ON pt.type_id = t.id
         WHERE pt.pokemon_id = :pokemon_id
+          AND NOT EXISTS (
+              SELECT 1 FROM api_resource ar
+              WHERE ar.resource_type = 'type' AND ar.id = t.id AND ar.is_present = false
+          )
         ORDER BY pt.slot
     """),
         {"pokemon_id": pokemon_id},
@@ -113,23 +192,41 @@ def get_pokemon(pokemon_id: int, db: Session = Depends(get_db)):
     }
 
 
-@app.get("/analytics/top-pokemon")
-def get_top_pokemon(limit: int = 10, db: Session = Depends(get_db)):
+@app.get("/analytics/top-pokemon", response_model=list[TopPokemon])
+def get_top_pokemon(limit: int = Query(10, ge=1, le=100), db: Session = Depends(get_db)):
     """Get top Pokémon by total base stats."""
     analyzer = StatsAnalyzer(db_session=db)
     return analyzer.get_top_pokemon_by_total_base_stats(limit=limit).to_dict(orient="records")
 
 
-@app.get("/analytics/type-distribution")
+@app.get("/analytics/type-distribution", response_model=list[TypeDistribution])
 def get_type_distribution(db: Session = Depends(get_db)):
     """Get the distribution of Pokémon types."""
     analyzer = StatsAnalyzer(db_session=db)
     return analyzer.get_type_distribution().to_dict(orient="records")
 
 
-@app.get("/analytics/pokemon/{pokemon_id}/counters")
-def get_pokemon_counters(pokemon_id: int, top_n: int = 5, db: Session = Depends(get_db)):
+@app.get("/analytics/pokemon/{pokemon_id}/counters", response_model=list[CounterType])
+def get_pokemon_counters(
+    pokemon_id: int = Path(ge=1),
+    top_n: int = Query(5, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
     """Get recommended counter types for a specific Pokémon."""
+    if (
+        db.execute(
+            text("""
+            SELECT 1 FROM pokemon p WHERE p.id = :id
+              AND NOT EXISTS (
+                  SELECT 1 FROM api_resource ar
+                  WHERE ar.resource_type = 'pokemon' AND ar.id = p.id AND ar.is_present = false
+              )
+        """),
+            {"id": pokemon_id},
+        ).first()
+        is None
+    ):
+        raise HTTPException(status_code=404, detail="Pokémon not found")
     analyzer = TypeAnalyzer(db_session=db)
     return analyzer.recommend_counter_types(pokemon_id, top_n=top_n).to_dict(orient="records")
 

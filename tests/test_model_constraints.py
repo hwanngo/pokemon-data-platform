@@ -29,6 +29,7 @@ def session():
         yield db
     finally:
         db.close()
+        engine.dispose()
 
 
 def _seed(session):
@@ -76,8 +77,16 @@ def test_pokemon_moves_unique_on_pokemon_move_and_method(session):
     _seed(session)
     session.add(Move(id=1, name="tackle"))
     session.commit()
-    session.add(PokemonMove(pokemon_id=1, move_id=1, level_learned_at=1, learn_method="level-up"))
+    session.add(
+        PokemonMove(
+            pokemon_id=1, move_id=1, version_group_id=1, level_learned_at=1, learn_method="level-up"
+        )
+    )
     session.commit()
-    session.add(PokemonMove(pokemon_id=1, move_id=1, level_learned_at=5, learn_method="level-up"))
+    session.add(
+        PokemonMove(
+            pokemon_id=1, move_id=1, version_group_id=1, level_learned_at=1, learn_method="level-up"
+        )
+    )
     with pytest.raises(IntegrityError):
         session.commit()

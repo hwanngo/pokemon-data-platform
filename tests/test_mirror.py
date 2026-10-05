@@ -37,6 +37,7 @@ def session():
         yield db
     finally:
         db.close()
+        engine.dispose()
 
 
 def test_ordered_resources_loads_parents_first():
@@ -92,7 +93,9 @@ def test_fetch_all_concurrent_yields_all_and_skips_failures():
     # Completeness + best-effort guard across the bounded-window submission path
     # (more ids than the 2*concurrency window; one id fails and is skipped).
     class FakeClient:
-        def get(self, path):
+        base_url = BASE
+
+        def get(self, path, use_cache=True):
             if "?" in path:  # list endpoint
                 return {
                     "results": [{"name": str(i), "url": f"{BASE}/thing/{i}/"} for i in range(1, 11)]
@@ -257,13 +260,16 @@ def test_fanout_skips_malformed_record_and_loads_the_rest(session):
         def fetch_all(self, name):
             return iter(raws.get(name, []))
 
-    run_mirror(
-        only=["type"],
-        fetcher=FakeFetcher(),
-        loader=ResourceLoader(db_session=session),
-        expand_deps=False,
-    )
-    assert session.query(Type).count() == 1  # good record loaded, bad one skipped
+    from src.ingestion.mirror import IncompleteMirrorError
+
+    with pytest.raises(IncompleteMirrorError):
+        run_mirror(
+            only=["type"],
+            fetcher=FakeFetcher(),
+            loader=ResourceLoader(db_session=session),
+            expand_deps=False,
+        )
+    assert session.query(Type).count() == 0  # no partial publication
 
 
 def test_run_mirror_routes_relational_and_jsonb(session):

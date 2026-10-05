@@ -5,7 +5,7 @@ JSONB tail (src/models/api_resource.py) into proper tables. Kept flat: scalar
 fields + FK ids only; nested arrays stay in the JSONB tail.
 """
 
-from sqlalchemy import Boolean, Column, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Column, ForeignKey, Index, Integer, String, Text
 
 from src.models.base import Base
 
@@ -29,6 +29,7 @@ class Generation(Base):
 
 class VersionGroup(Base):
     __tablename__ = "version_groups"
+    __table_args__ = (Index("idx_version_groups_gen", "generation_id"),)
 
     id = Column(Integer, primary_key=True)
     name = Column(String(100), nullable=False)
@@ -38,6 +39,7 @@ class VersionGroup(Base):
 
 class Version(Base):
     __tablename__ = "versions"
+    __table_args__ = (Index("idx_versions_vg", "version_group_id"),)
 
     id = Column(Integer, primary_key=True)
     name = Column(String(100), nullable=False)
@@ -63,6 +65,7 @@ class ItemCategory(Base):
 
 class Item(Base):
     __tablename__ = "items"
+    __table_args__ = (Index("idx_items_category", "category_id"),)
 
     id = Column(Integer, primary_key=True)
     name = Column(String(100), nullable=False)
@@ -75,6 +78,7 @@ class Item(Base):
 
 class Berry(Base):
     __tablename__ = "berries"
+    __table_args__ = (Index("idx_berries_item", "item_id"),)
 
     id = Column(Integer, primary_key=True)
     name = Column(String(100), nullable=False)
@@ -91,6 +95,10 @@ class Berry(Base):
 
 class Machine(Base):
     __tablename__ = "machines"
+    __table_args__ = (
+        Index("idx_machines_item", "item_id"),
+        Index("idx_machines_vg", "version_group_id"),
+    )
 
     id = Column(Integer, primary_key=True)
     name = Column(String(100), nullable=False)  # the TM/HM item slug
@@ -101,6 +109,7 @@ class Machine(Base):
 
 class Location(Base):
     __tablename__ = "locations"
+    __table_args__ = (Index("idx_locations_region", "region_id"),)
 
     id = Column(Integer, primary_key=True)
     name = Column(String(100), nullable=False)
@@ -109,6 +118,7 @@ class Location(Base):
 
 class LocationArea(Base):
     __tablename__ = "location_areas"
+    __table_args__ = (Index("idx_location_areas_loc", "location_id"),)
 
     id = Column(Integer, primary_key=True)
     name = Column(String(150), nullable=False)
@@ -118,6 +128,7 @@ class LocationArea(Base):
 
 class PokemonSpecies(Base):
     __tablename__ = "pokemon_species"
+    __table_args__ = (Index("idx_species_generation", "generation_id"),)
 
     id = Column(Integer, primary_key=True)
     name = Column(String(100), nullable=False)

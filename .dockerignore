@@ -3,6 +3,22 @@
 .gitignore
 .github
 
+# Never send local configuration or key material to the build daemon.
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+secrets/
+
 # Python caches / build artifacts
 __pycache__/
 *.py[cod]

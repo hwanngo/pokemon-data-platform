@@ -25,6 +25,7 @@ from src.models.mirror import (
     Version,
     VersionGroup,
 )
+from src.models.mirror_run import MirrorResourceRun
 from src.models.move import Move, PokemonMove
 from src.models.pokemon import Pokemon, PokemonStat
 from src.models.type import PokemonType, Type, TypeEffectiveness
@@ -54,6 +55,7 @@ __all__ = [
     "VersionGroup",
     "Move",
     "PokemonMove",
+    "MirrorResourceRun",
     "Pokemon",
     "PokemonStat",
     "PokemonType",

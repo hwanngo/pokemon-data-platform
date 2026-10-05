@@ -1,7 +1,7 @@
 -- Pokémon Data Analytics Platform — base schema.
--- This file is the single source of truth for the database structure and is
--- kept in sync with the SQLAlchemy models under src/models/.
--- It is executed once by database/initdb/init.sh before any migrations run.
+-- Fresh-install base schema, kept in sync with the SQLAlchemy models.
+-- database/migrate.sh also runs it on existing volumes, then applies numbered
+-- ALTER migrations for columns and constraints CREATE IF NOT EXISTS cannot add.
 
 -- ---------------------------------------------------------------------------
 -- Core entities (ids come from PokéAPI, so they are explicit INTEGER PKs).
@@ -14,7 +14,8 @@ CREATE TABLE IF NOT EXISTS pokemon (
     weight          INTEGER      NOT NULL,
     base_experience INTEGER,
     is_default      BOOLEAN      NOT NULL,
-    order_num       INTEGER
+    order_num       INTEGER,
+    species_id      INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS types (
@@ -83,7 +84,9 @@ CREATE TABLE IF NOT EXISTS pokemon_moves (
     move_id          INTEGER NOT NULL REFERENCES moves (id),
     level_learned_at INTEGER,
     learn_method     VARCHAR(50),
-    UNIQUE (pokemon_id, move_id, learn_method)
+    version_group_id INTEGER,
+    CONSTRAINT uq_pokemon_moves_provenance
+        UNIQUE (pokemon_id, move_id, version_group_id, learn_method, level_learned_at)
 );
 
 -- ---------------------------------------------------------------------------
@@ -112,6 +115,9 @@ CREATE TABLE IF NOT EXISTS api_resource (
     name          VARCHAR(128),
     data          JSONB         NOT NULL,
     fetched_at    TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    source_fetched_at TIMESTAMP WITH TIME ZONE,
+    loaded_at     TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    is_present    BOOLEAN NOT NULL DEFAULT TRUE,
     PRIMARY KEY (resource_type, id)
 );
 CREATE INDEX IF NOT EXISTS idx_api_resource_name ON api_resource (resource_type, name);
@@ -254,3 +260,16 @@ CREATE INDEX IF NOT EXISTS idx_version_groups_gen  ON version_groups (generation
 CREATE INDEX IF NOT EXISTS idx_locations_region    ON locations (region_id);
 CREATE INDEX IF NOT EXISTS idx_location_areas_loc  ON location_areas (location_id);
 CREATE INDEX IF NOT EXISTS idx_species_generation  ON pokemon_species (generation_id);
+
+CREATE TABLE IF NOT EXISTS mirror_resource_runs (
+    run_id        VARCHAR(36) PRIMARY KEY,
+    resource_type VARCHAR(64) NOT NULL,
+    started_at    TIMESTAMP WITH TIME ZONE NOT NULL,
+    completed_at  TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    status        VARCHAR(16) NOT NULL,
+    attempted     INTEGER NOT NULL,
+    succeeded     INTEGER NOT NULL,
+    failed        INTEGER NOT NULL,
+    failed_ids    JSON NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mirror_run_resource_completed ON mirror_resource_runs (resource_type, completed_at);

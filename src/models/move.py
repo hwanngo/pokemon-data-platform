@@ -1,6 +1,6 @@
 """Move model definitions."""
 
-from sqlalchemy import Column, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import Column, ForeignKey, Index, Integer, String, UniqueConstraint
 from sqlalchemy.orm import relationship
 
 from src.models.base import Base
@@ -8,6 +8,7 @@ from src.models.base import Base
 
 class Move(Base):
     __tablename__ = "moves"
+    __table_args__ = (Index("idx_moves_type_id", "type_id"),)
 
     id = Column(Integer, primary_key=True)
     name = Column(String(100), nullable=False, unique=True)
@@ -27,13 +28,21 @@ class Move(Base):
 
 class PokemonMove(Base):
     __tablename__ = "pokemon_moves"
-    __table_args__ = (UniqueConstraint("pokemon_id", "move_id", "learn_method"),)
+    __table_args__ = (
+        UniqueConstraint(
+            "pokemon_id", "move_id", "version_group_id", "learn_method", "level_learned_at"
+        ),
+        Index("idx_pokemon_moves_pokemon_id", "pokemon_id"),
+        Index("idx_pokemon_moves_move_id", "move_id"),
+        Index("idx_pokemon_moves_version_group", "version_group_id"),
+    )
 
     id = Column(Integer, primary_key=True)
     pokemon_id = Column(Integer, ForeignKey("pokemon.id"), nullable=False)
     move_id = Column(Integer, ForeignKey("moves.id"), nullable=False)
-    level_learned_at = Column(Integer)
-    learn_method = Column(String(50))
+    level_learned_at = Column(Integer, nullable=False, default=0)
+    learn_method = Column(String(50), nullable=False)
+    version_group_id = Column(Integer, ForeignKey("version_groups.id"))
 
     # Relationships
     pokemon = relationship("Pokemon", back_populates="moves")

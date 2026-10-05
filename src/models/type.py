@@ -1,6 +1,6 @@
 """Type model definitions."""
 
-from sqlalchemy import Column, ForeignKey, Integer, Numeric, String, UniqueConstraint
+from sqlalchemy import Column, ForeignKey, Index, Integer, Numeric, String, UniqueConstraint
 from sqlalchemy.orm import relationship
 
 from src.models.base import Base
@@ -34,7 +34,11 @@ class Type(Base):
 
 class PokemonType(Base):
     __tablename__ = "pokemon_types"
-    __table_args__ = (UniqueConstraint("pokemon_id", "slot"),)
+    __table_args__ = (
+        UniqueConstraint("pokemon_id", "slot"),
+        Index("idx_pokemon_types_pokemon_id", "pokemon_id"),
+        Index("idx_pokemon_types_type_id", "type_id"),
+    )
 
     id = Column(Integer, primary_key=True)
     pokemon_id = Column(Integer, ForeignKey("pokemon.id"), nullable=False)
@@ -53,7 +57,11 @@ class PokemonType(Base):
 
 class TypeEffectiveness(Base):
     __tablename__ = "type_effectiveness"
-    __table_args__ = (UniqueConstraint("attack_type_id", "defense_type_id"),)
+    __table_args__ = (
+        UniqueConstraint("attack_type_id", "defense_type_id"),
+        Index("idx_type_eff_attack", "attack_type_id"),
+        Index("idx_type_eff_defense", "defense_type_id"),
+    )
 
     id = Column(Integer, primary_key=True)
     attack_type_id = Column(Integer, ForeignKey("types.id"), nullable=False)

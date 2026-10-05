@@ -14,7 +14,7 @@ def test_importing_models_package_registers_all_tables():
         "import src.models; from src.models.base import Base; "
         "tables = set(Base.metadata.tables); "
         "required = {'pokemon', 'types', 'abilities', 'moves', 'pokemon_stats', "
-        "'pokemon_types', 'type_effectiveness', 'api_resource', 'natures', 'machines'}; "
+        "'pokemon_types', 'type_effectiveness', 'api_resource', 'natures', 'machines', 'mirror_resource_runs'}; "
         "missing = required - tables; "
         "assert not missing, f'unregistered: {sorted(missing)}'; "
         "print('ok', len(tables))"
